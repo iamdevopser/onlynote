@@ -1,0 +1,13 @@
+# MySQL Service Dockerfile
+FROM mysql:8.0
+
+# Copy custom MySQL configuration if it exists
+COPY docker/mysql/my.cnf /etc/mysql/conf.d/my.cnf 2>/dev/null || echo "# MySQL Config" > /etc/mysql/conf.d/my.cnf
+
+# Expose MySQL port
+EXPOSE 3306
+
+# Use default MySQL entrypoint
+# Environment variables should be set in docker-compose
+CMD ["mysqld"]
+

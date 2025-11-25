@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# AWS ECR Deployment Script for OnlyNote
-# This script sets up ECR, builds and pushes the Docker image, and runs the application
-# Note: We use set -e carefully, disabling it for non-critical commands
+# AWS ECR Microservices Deployment Script for OnlyNote
+# This script builds and deploys all microservices to AWS ECR
+# Designed for CI/CD pipelines - fully automated, non-interactive
+
 set -e
 
-# Colors
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,9 +16,27 @@ NC='\033[0m'
 # Configuration
 PROJECT_NAME="onlynote"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-ECR_REPOSITORY_NAME="${PROJECT_NAME}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
+SKIP_START="${SKIP_START:-false}"
 
+# Global variables (will be set in check_prerequisites)
+AWS_ACCOUNT_ID=""
+ECR_REGISTRY=""
+
+# Microservices configuration
+SERVICES=("app" "mysql" "redis")
+ECR_REPOSITORIES=(
+    "${PROJECT_NAME}-app"
+    "${PROJECT_NAME}-mysql"
+    "${PROJECT_NAME}-redis"
+)
+DOCKERFILES=(
+    "Dockerfile.app"
+    "Dockerfile.mysql"
+    "Dockerfile.redis"
+)
+
+# Logging functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -50,7 +69,6 @@ check_prerequisites() {
     set -e
     if [ $? -ne 0 ]; then
         log_error "AWS CLI is installed but not working properly."
-        log_error "Please check your AWS CLI installation."
         exit 1
     else
         log_info "AWS CLI version: ${AWS_CLI_VERSION}"
@@ -70,85 +88,42 @@ check_prerequisites() {
     
     # Check AWS credentials
     log_info "Checking AWS credentials..."
-    
-    # Check AWS CLI config for invalid output format
-    if [ -f ~/.aws/config ]; then
-        INVALID_OUTPUT=$(grep -i "output.*=.*deploy" ~/.aws/config 2>/dev/null || echo "")
-        if [ -n "$INVALID_OUTPUT" ]; then
-            log_warning "Found invalid output format in AWS config. Attempting to fix..."
-            # Backup config
-            cp ~/.aws/config ~/.aws/config.backup.$(date +%s) 2>/dev/null || true
-            # Remove invalid output line
-            sed -i '/output.*=.*deploy/d' ~/.aws/config 2>/dev/null || true
-            log_info "AWS config file has been corrected. Please run 'aws configure' again if needed."
-        fi
-    fi
-    
-    set +e  # Temporarily disable exit on error to capture output
-    # Explicitly set output format to json to avoid config issues
+    set +e
     AWS_IDENTITY_OUTPUT=$(aws sts get-caller-identity --output json 2>&1)
     AWS_IDENTITY_EXIT_CODE=$?
-    set -e  # Re-enable exit on error
+    set -e
     
     if [ $AWS_IDENTITY_EXIT_CODE -ne 0 ]; then
         log_error "AWS credentials are not configured or invalid."
         log_error "Error details: $AWS_IDENTITY_OUTPUT"
-        echo ""
-        
-        # Check if error is related to output format
-        if echo "$AWS_IDENTITY_OUTPUT" | grep -qi "unknown output type\|output format"; then
-            log_error "AWS CLI output format is incorrectly configured!"
-            log_info "To fix this, run:"
-            echo "   aws configure set output json"
-            echo "   OR"
-            echo "   Edit ~/.aws/config and change 'output = ...' to 'output = json'"
-            echo ""
-        fi
-        
-        log_info "Please configure AWS credentials using one of these methods:"
-        echo "  1. Run 'aws configure' and enter your credentials"
-        echo "     - When asked for 'Default output format', enter: json"
-        echo "  2. Set environment variables:"
-        echo "     export AWS_ACCESS_KEY_ID=your-access-key"
-        echo "     export AWS_SECRET_ACCESS_KEY=your-secret-key"
-        echo "     export AWS_DEFAULT_REGION=us-east-1"
+        log_info "Please configure AWS credentials using:"
+        echo "  1. Run 'aws configure'"
+        echo "  2. Set environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY"
         echo "  3. If running on EC2, attach an IAM role with ECR permissions"
-        echo ""
         exit 1
     fi
     
-    # Display AWS identity for verification
-    # Temporarily disable set -e for parsing commands
+    # Parse AWS account ID
     set +e
     AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Account":\s*"\K[^"]+' 2>/dev/null)
     if [ -z "$AWS_ACCOUNT_ID" ]; then
         AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Account' 2>/dev/null)
     fi
-    AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Arn":\s*"\K[^"]+' 2>/dev/null)
-    if [ -z "$AWS_USER_ARN" ]; then
-        AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Arn' 2>/dev/null)
-    fi
     set -e
     
     if [ -n "$AWS_ACCOUNT_ID" ] && [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
         log_success "AWS credentials verified (Account: ${AWS_ACCOUNT_ID})"
-        if [ -n "$AWS_USER_ARN" ]; then
-            log_info "Using identity: ${AWS_USER_ARN}"
-        fi
     else
-        log_warning "Could not parse AWS account ID from output"
+        log_error "Could not parse AWS account ID"
+        exit 1
     fi
     
-    # Check if AWS region is set
+    # Set AWS region
     if [ -z "$AWS_REGION" ] && [ -z "$AWS_DEFAULT_REGION" ]; then
-        # Try to get region from EC2 instance metadata if available
-        # Temporarily disable set -e for curl command
         set +e
         EC2_REGION=$(curl -s --max-time 1 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
-        CURL_EXIT=$?
         set -e
-        
-        if [ $CURL_EXIT -eq 0 ] && [ -n "$EC2_REGION" ]; then
+        if [ -n "$EC2_REGION" ]; then
             AWS_REGION="$EC2_REGION"
             log_info "Detected AWS region from EC2 metadata: ${AWS_REGION}"
         else
@@ -160,55 +135,63 @@ check_prerequisites() {
         log_info "Using AWS region: ${AWS_REGION}"
     fi
     
+    # Export global variables
+    export AWS_ACCOUNT_ID
+    export AWS_REGION
+    ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    export ECR_REGISTRY
+    log_success "ECR Registry: ${ECR_REGISTRY}"
+    
     log_success "All prerequisites are met"
 }
 
-# Get AWS Account ID and ECR Registry
-get_aws_info() {
-    log_info "Getting AWS account information..."
-    set +e
-    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>&1)
-    AWS_ACCOUNT_EXIT=$?
-    set -e
-    
-    # Check if the command was successful
-    if [ $AWS_ACCOUNT_EXIT -eq 0 ] && [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        log_success "AWS Account ID: ${AWS_ACCOUNT_ID}"
-        log_success "ECR Registry: ${ECR_REGISTRY}"
-    else
-        log_error "Failed to get AWS account ID: $AWS_ACCOUNT_ID"
-        log_error "Please check your AWS credentials configuration."
-        log_info "Try running: aws configure set output json"
-        exit 1
-    fi
-}
-
-# Create ECR repository
+# Create ECR repository for a service
 create_ecr_repository() {
-    log_info "Setting up ECR repository..."
+    local SERVICE_NAME=$1
+    local REPO_NAME=$2
+    
+    log_info "Setting up ECR repository for ${SERVICE_NAME}..."
     
     set +e
-    aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} --output json &> /dev/null
+    aws ecr describe-repositories --repository-names ${REPO_NAME} --region ${AWS_REGION} --output json &> /dev/null
     ECR_EXISTS=$?
     set -e
     
     if [ $ECR_EXISTS -eq 0 ]; then
-        log_warning "ECR repository ${ECR_REPOSITORY_NAME} already exists"
+        log_warning "ECR repository ${REPO_NAME} already exists"
     else
-        log_info "Creating ECR repository..."
-        aws ecr create-repository \
-            --repository-name ${ECR_REPOSITORY_NAME} \
+        log_info "Creating ECR repository ${REPO_NAME}..."
+        set +e
+        CREATE_OUTPUT=$(aws ecr create-repository \
+            --repository-name ${REPO_NAME} \
             --region ${AWS_REGION} \
             --image-scanning-configuration scanOnPush=true \
             --encryption-configuration encryptionType=AES256 \
-            --output json
-        log_success "ECR repository created"
+            --output json 2>&1)
+        CREATE_EXIT=$?
+        set -e
+        
+        if [ $CREATE_EXIT -eq 0 ]; then
+            log_success "ECR repository ${REPO_NAME} created"
+        else
+            if echo "$CREATE_OUTPUT" | grep -q "AccessDeniedException\|not authorized"; then
+                log_error "Permission denied: Cannot create ECR repository ${REPO_NAME}"
+                log_error "IAM user lacks 'ecr:CreateRepository' permission"
+                log_info "Please either:"
+                log_info "  1. Ask your AWS administrator to grant 'ecr:CreateRepository' permission"
+                log_info "  2. Create the repository manually in AWS Console"
+                log_info "  3. Use an IAM user/role with ECR full access"
+                log_warning "Skipping repository creation. Assuming it exists or will be created manually."
+            else
+                log_error "Failed to create ECR repository: $CREATE_OUTPUT"
+                exit 1
+            fi
+        fi
     fi
     
-    # Set lifecycle policy for Free Tier optimization
-    log_info "Setting ECR lifecycle policy..."
-    cat > /tmp/ecr-lifecycle-policy.json << EOF
+    # Set lifecycle policy
+    log_info "Setting ECR lifecycle policy for ${REPO_NAME}..."
+    cat > /tmp/ecr-lifecycle-policy-${SERVICE_NAME}.json << EOF
 {
   "rules": [
     {
@@ -242,16 +225,13 @@ EOF
     
     set +e
     aws ecr put-lifecycle-policy \
-        --repository-name ${ECR_REPOSITORY_NAME} \
-        --lifecycle-policy-text file:///tmp/ecr-lifecycle-policy.json \
+        --repository-name ${REPO_NAME} \
+        --lifecycle-policy-text file:///tmp/ecr-lifecycle-policy-${SERVICE_NAME}.json \
         --region ${AWS_REGION} \
         --output json &> /dev/null
     set -e
-    if [ $? -ne 0 ]; then
-        log_warning "Could not set lifecycle policy"
-    fi
     
-    rm -f /tmp/ecr-lifecycle-policy.json
+    rm -f /tmp/ecr-lifecycle-policy-${SERVICE_NAME}.json
 }
 
 # Login to ECR
@@ -262,40 +242,79 @@ login_to_ecr() {
     log_success "Logged in to ECR"
 }
 
-# Build Docker image
+# Build Docker image for a service
 build_image() {
-    log_info "Building Docker image..."
-    docker build -f Dockerfile.free-tier -t ${ECR_REPOSITORY_NAME}:${IMAGE_TAG} .
-    log_success "Docker image built successfully"
+    local SERVICE_NAME=$1
+    local DOCKERFILE=$2
+    local REPO_NAME=$3
+    
+    log_info "Building Docker image for ${SERVICE_NAME}..."
+    
+    if [ ! -f "$DOCKERFILE" ]; then
+        log_error "Dockerfile not found: ${DOCKERFILE}"
+        return 1
+    fi
+    
+    docker build -f ${DOCKERFILE} -t ${REPO_NAME}:${IMAGE_TAG} .
+    log_success "Docker image for ${SERVICE_NAME} built successfully"
 }
 
 # Tag and push image to ECR
 push_image() {
-    log_info "Tagging and pushing image to ECR..."
+    local SERVICE_NAME=$1
+    local REPO_NAME=$2
+    
+    log_info "Tagging and pushing ${SERVICE_NAME} image to ECR..."
     
     # Tag image
-    docker tag ${ECR_REPOSITORY_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
-    docker tag ${ECR_REPOSITORY_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest
+    docker tag ${REPO_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${REPO_NAME}:${IMAGE_TAG}
+    docker tag ${REPO_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${REPO_NAME}:latest
     
     # Push image
-    docker push ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
-    docker push ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest
+    docker push ${ECR_REGISTRY}/${REPO_NAME}:${IMAGE_TAG}
+    docker push ${ECR_REGISTRY}/${REPO_NAME}:latest
     
-    log_success "Image pushed to ECR successfully"
-    log_info "Image URI: ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}"
+    log_success "${SERVICE_NAME} image pushed to ECR successfully"
+    log_info "Image URI: ${ECR_REGISTRY}/${REPO_NAME}:${IMAGE_TAG}"
 }
 
-# Create docker-compose file with ECR image
+# Build and push all microservices
+build_and_push_all_services() {
+    log_info "Building and pushing all microservices..."
+    
+    for i in "${!SERVICES[@]}"; do
+        SERVICE_NAME=${SERVICES[$i]}
+        REPO_NAME=${ECR_REPOSITORIES[$i]}
+        DOCKERFILE=${DOCKERFILES[$i]}
+        
+        log_info "Processing microservice: ${SERVICE_NAME}"
+        
+        # Create ECR repository
+        create_ecr_repository ${SERVICE_NAME} ${REPO_NAME}
+        
+        # Build image
+        build_image ${SERVICE_NAME} ${DOCKERFILE} ${REPO_NAME}
+        
+        # Push image
+        push_image ${SERVICE_NAME} ${REPO_NAME}
+        
+        echo ""
+    done
+    
+    log_success "All microservices built and pushed successfully"
+}
+
+# Create docker-compose file with ECR images
 create_docker_compose() {
-    log_info "Creating docker-compose file with ECR image..."
+    log_info "Creating docker-compose file with ECR images..."
     
     cat > docker-compose.ecr.yml << EOF
 version: '3.8'
 
 services:
-  # MySQL Database
+  # MySQL Database Service (from ECR)
   mysql:
-    image: mysql:8.0
+    image: ${ECR_REGISTRY}/${PROJECT_NAME}-mysql:${IMAGE_TAG}
     container_name: ${PROJECT_NAME}_mysql
     restart: unless-stopped
     environment:
@@ -312,15 +331,16 @@ services:
       - ${PROJECT_NAME}_network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p\${DB_ROOT_PASSWORD:-rootpassword}"]
-      timeout: 20s
-      retries: 10
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
-  # Redis Cache
+  # Redis Cache Service (from ECR)
   redis:
-    image: redis:7-alpine
+    image: ${ECR_REGISTRY}/${PROJECT_NAME}-redis:${IMAGE_TAG}
     container_name: ${PROJECT_NAME}_redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
       - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
@@ -330,17 +350,20 @@ services:
       - ${PROJECT_NAME}_network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
       timeout: 3s
       retries: 5
+      start_period: 10s
 
-  # Laravel Application (from ECR)
+  # Laravel Application Service (from ECR)
   app:
-    image: ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
+    image: ${ECR_REGISTRY}/${PROJECT_NAME}-app:${IMAGE_TAG}
     container_name: ${PROJECT_NAME}_app
     restart: unless-stopped
     working_dir: /var/www/html
     volumes:
       - app_storage:/var/www/html/storage
+      - app_bootstrap_cache:/var/www/html/bootstrap/cache
     environment:
       - APP_ENV=\${APP_ENV:-production}
       - APP_DEBUG=\${APP_DEBUG:-false}
@@ -366,11 +389,11 @@ services:
     networks:
       - ${PROJECT_NAME}_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "curl", "-f", "http://localhost/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
 volumes:
   mysql_data:
@@ -378,6 +401,8 @@ volumes:
   redis_data:
     driver: local
   app_storage:
+    driver: local
+  app_bootstrap_cache:
     driver: local
 
 networks:
@@ -390,6 +415,11 @@ EOF
 
 # Start application with docker-compose
 start_application() {
+    if [ "$SKIP_START" = "true" ]; then
+        log_info "Skipping application start (SKIP_START=true)"
+        return
+    fi
+    
     log_info "Starting application with docker-compose..."
     
     # Use docker compose if available, otherwise docker-compose
@@ -399,7 +429,20 @@ start_application() {
         COMPOSE_CMD="docker-compose"
     fi
     
+    # Pull latest images
+    log_info "Pulling latest images from ECR..."
+    ${COMPOSE_CMD} -f docker-compose.ecr.yml pull
+    
+    # Start services
+    log_info "Starting all services..."
     ${COMPOSE_CMD} -f docker-compose.ecr.yml up -d
+    
+    # Wait for services to be healthy
+    log_info "Waiting for services to be healthy..."
+    sleep 10
+    
+    # Check service status
+    ${COMPOSE_CMD} -f docker-compose.ecr.yml ps
     
     log_success "Application started successfully"
     log_info "Application is running at: http://localhost"
@@ -410,39 +453,37 @@ start_application() {
 # Main execution
 main() {
     echo ""
-    echo "🚀 OnlyNote AWS ECR Deployment Script"
-    echo "======================================"
+    echo "🚀 OnlyNote AWS ECR Microservices Deployment Script"
+    echo "===================================================="
     echo ""
     
+    # Check prerequisites
     check_prerequisites
-    get_aws_info
-    create_ecr_repository
+    
+    # Login to ECR
     login_to_ecr
-    build_image
-    push_image
+    
+    # Build and push all microservices
+    build_and_push_all_services
+    
+    # Create docker-compose file
     create_docker_compose
     
-    echo ""
-    read -p "Do you want to start the application now? (y/n) " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        start_application
-    else
-        log_info "You can start the application later with:"
-        log_info "  docker-compose -f docker-compose.ecr.yml up -d"
-    fi
+    # Start application
+    start_application
     
     echo ""
     log_success "Deployment completed!"
     echo ""
     echo "📦 ECR Repository Information:"
-    echo "   Repository: ${ECR_REPOSITORY_NAME}"
-    echo "   Registry: ${ECR_REGISTRY}"
-    echo "   Image: ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}"
+    for i in "${!SERVICES[@]}"; do
+        SERVICE_NAME=${SERVICES[$i]}
+        REPO_NAME=${ECR_REPOSITORIES[$i]}
+        echo "   ${SERVICE_NAME}: ${ECR_REGISTRY}/${REPO_NAME}:${IMAGE_TAG}"
+    done
     echo "   Region: ${AWS_REGION}"
     echo ""
 }
 
 # Run main function
 main "$@"
-

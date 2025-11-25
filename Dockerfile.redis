@@ -1,0 +1,12 @@
+# Redis Service Dockerfile
+FROM redis:7-alpine
+
+# Copy custom Redis configuration if it exists
+COPY docker/redis/redis.conf /usr/local/etc/redis/redis.conf 2>/dev/null || echo "# Redis Config" > /usr/local/etc/redis/redis.conf
+
+# Enable AOF persistence
+CMD ["redis-server", "--appendonly", "yes"]
+
+# Expose Redis port
+EXPOSE 6379
+
