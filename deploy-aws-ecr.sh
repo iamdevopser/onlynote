@@ -2,6 +2,7 @@
 
 # AWS ECR Deployment Script for OnlyNote
 # This script sets up ECR, builds and pushes the Docker image, and runs the application
+# Note: We use set -e carefully, disabling it for non-critical commands
 set -e
 
 # Colors
@@ -43,6 +44,18 @@ check_prerequisites() {
         exit 1
     fi
     
+    # Verify AWS CLI is working
+    set +e
+    AWS_CLI_VERSION=$(aws --version 2>&1)
+    set -e
+    if [ $? -ne 0 ]; then
+        log_error "AWS CLI is installed but not working properly."
+        log_error "Please check your AWS CLI installation."
+        exit 1
+    else
+        log_info "AWS CLI version: ${AWS_CLI_VERSION}"
+    fi
+    
     # Check Docker
     if ! command -v docker &> /dev/null; then
         log_error "Docker is not installed. Please install it first: https://docs.docker.com/get-docker/"
@@ -57,8 +70,10 @@ check_prerequisites() {
     
     # Check AWS credentials
     log_info "Checking AWS credentials..."
+    set +e  # Temporarily disable exit on error to capture output
     AWS_IDENTITY_OUTPUT=$(aws sts get-caller-identity 2>&1)
     AWS_IDENTITY_EXIT_CODE=$?
+    set -e  # Re-enable exit on error
     
     if [ $AWS_IDENTITY_EXIT_CODE -ne 0 ]; then
         log_error "AWS credentials are not configured or invalid."
@@ -76,8 +91,17 @@ check_prerequisites() {
     fi
     
     # Display AWS identity for verification
-    AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Account":\s*"\K[^"]+' || echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Account' 2>/dev/null || echo "")
-    AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Arn":\s*"\K[^"]+' || echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Arn' 2>/dev/null || echo "")
+    # Temporarily disable set -e for parsing commands
+    set +e
+    AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Account":\s*"\K[^"]+' 2>/dev/null)
+    if [ -z "$AWS_ACCOUNT_ID" ]; then
+        AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Account' 2>/dev/null)
+    fi
+    AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Arn":\s*"\K[^"]+' 2>/dev/null)
+    if [ -z "$AWS_USER_ARN" ]; then
+        AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Arn' 2>/dev/null)
+    fi
+    set -e
     
     if [ -n "$AWS_ACCOUNT_ID" ] && [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
         log_success "AWS credentials verified (Account: ${AWS_ACCOUNT_ID})"
@@ -91,8 +115,14 @@ check_prerequisites() {
     # Check if AWS region is set
     if [ -z "$AWS_REGION" ] && [ -z "$AWS_DEFAULT_REGION" ]; then
         # Try to get region from EC2 instance metadata if available
-        if curl -s --max-time 1 http://169.254.169.254/latest/meta-data/placement/region &> /dev/null; then
-            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+        # Temporarily disable set -e for curl command
+        set +e
+        EC2_REGION=$(curl -s --max-time 1 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+        CURL_EXIT=$?
+        set -e
+        
+        if [ $CURL_EXIT -eq 0 ] && [ -n "$EC2_REGION" ]; then
+            AWS_REGION="$EC2_REGION"
             log_info "Detected AWS region from EC2 metadata: ${AWS_REGION}"
         else
             AWS_REGION="us-east-1"
