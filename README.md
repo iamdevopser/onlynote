@@ -1,4 +1,4 @@
-# 🎓 OnliNote LMS Platform
+# 🎓 OnlyNote LMS Platform
 
 Kapsamlı bir Learning Management System (LMS) platformu. Kullanıcılar kurslara kaydolabilir, eğitmenler kurs oluşturabilir, adminler sistemi yönetebilir.
 
@@ -92,7 +92,36 @@ npm run build
 php artisan serve
 ```
 
-## ☁️ AWS Free Tier Deployment
+## ☁️ AWS ECR Deployment
+
+AWS Container Registry (ECR) üzerinden otomatik deployment:
+
+### Hızlı Başlangıç
+
+```bash
+# Deployment script'ini çalıştır
+chmod +x deploy-aws-ecr.sh
+./deploy-aws-ecr.sh
+```
+
+Script otomatik olarak:
+- ✅ ECR repository oluşturur
+- ✅ Docker image'ı build eder ve ECR'ye push eder
+- ✅ Docker Compose ile uygulamayı başlatır
+
+### GitHub Actions ile Otomatik Deploy
+
+Her `main` branch'e push'ta otomatik olarak ECR'ye image push edilir.
+
+**GitHub Secrets ayarlama:**
+1. Repository → Settings → Secrets and variables → Actions
+2. Şu secrets'ları ekleyin:
+   - `AWS_ACCESS_KEY_ID`
+   - `AWS_SECRET_ACCESS_KEY`
+
+Detaylı rehber için [AWS-ECR-DEPLOYMENT.md](AWS-ECR-DEPLOYMENT.md) dosyasına bakın.
+
+## ☁️ AWS Free Tier Deployment (Alternatif)
 
 Tamamen ücretsiz AWS Free Tier deployment için:
 
@@ -104,14 +133,11 @@ chmod +x deploy-free-simple.sh
 
 **Maliyet: $0** (Free Tier kaynakları kullanılır)
 
-Detaylı rehber için [AWS-FREE-DEPLOYMENT.md](AWS-FREE-DEPLOYMENT.md) dosyasına bakın.
-
 ## 📚 Dokümantasyon
 
-- [AWS Free Tier Deployment Guide](AWS-FREE-DEPLOYMENT.md) - AWS kurulum rehberi
-- [Quick Start Guide](QUICK-START-FREE.md) - Hızlı başlangıç
+- [AWS ECR Deployment Guide](AWS-ECR-DEPLOYMENT.md) - AWS ECR kurulum rehberi (Önerilen)
+- [AWS Free Tier Deployment Guide](AWS-KURULUM-ADIM-ADIM.md) - AWS Free Tier kurulum rehberi
 - [Docker Setup](DOCKER-README.md) - Docker kurulumu
-- [GitHub Setup Guide](GITHUB-SETUP.md) - GitHub'a yükleme rehberi
 
 ## 🗂️ Proje Yapısı
 
