@@ -56,9 +56,51 @@ check_prerequisites() {
     fi
     
     # Check AWS credentials
-    if ! aws sts get-caller-identity &> /dev/null; then
-        log_error "AWS credentials are not configured. Please run 'aws configure' first."
+    log_info "Checking AWS credentials..."
+    AWS_IDENTITY_OUTPUT=$(aws sts get-caller-identity 2>&1)
+    AWS_IDENTITY_EXIT_CODE=$?
+    
+    if [ $AWS_IDENTITY_EXIT_CODE -ne 0 ]; then
+        log_error "AWS credentials are not configured or invalid."
+        log_error "Error details: $AWS_IDENTITY_OUTPUT"
+        echo ""
+        log_info "Please configure AWS credentials using one of these methods:"
+        echo "  1. Run 'aws configure' and enter your credentials"
+        echo "  2. Set environment variables:"
+        echo "     export AWS_ACCESS_KEY_ID=your-access-key"
+        echo "     export AWS_SECRET_ACCESS_KEY=your-secret-key"
+        echo "     export AWS_DEFAULT_REGION=us-east-1"
+        echo "  3. If running on EC2, attach an IAM role with ECR permissions"
+        echo ""
         exit 1
+    fi
+    
+    # Display AWS identity for verification
+    AWS_ACCOUNT_ID=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Account":\s*"\K[^"]+' || echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Account' 2>/dev/null || echo "")
+    AWS_USER_ARN=$(echo "$AWS_IDENTITY_OUTPUT" | grep -oP '"Arn":\s*"\K[^"]+' || echo "$AWS_IDENTITY_OUTPUT" | jq -r '.Arn' 2>/dev/null || echo "")
+    
+    if [ -n "$AWS_ACCOUNT_ID" ] && [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+        log_success "AWS credentials verified (Account: ${AWS_ACCOUNT_ID})"
+        if [ -n "$AWS_USER_ARN" ]; then
+            log_info "Using identity: ${AWS_USER_ARN}"
+        fi
+    else
+        log_warning "Could not parse AWS account ID from output"
+    fi
+    
+    # Check if AWS region is set
+    if [ -z "$AWS_REGION" ] && [ -z "$AWS_DEFAULT_REGION" ]; then
+        # Try to get region from EC2 instance metadata if available
+        if curl -s --max-time 1 http://169.254.169.254/latest/meta-data/placement/region &> /dev/null; then
+            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+            log_info "Detected AWS region from EC2 metadata: ${AWS_REGION}"
+        else
+            AWS_REGION="us-east-1"
+            log_warning "AWS region not set, defaulting to: ${AWS_REGION}"
+        fi
+    else
+        AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION}}"
+        log_info "Using AWS region: ${AWS_REGION}"
     fi
     
     log_success "All prerequisites are met"
@@ -67,10 +109,18 @@ check_prerequisites() {
 # Get AWS Account ID and ECR Registry
 get_aws_info() {
     log_info "Getting AWS account information..."
-    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-    ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    log_success "AWS Account ID: ${AWS_ACCOUNT_ID}"
-    log_success "ECR Registry: ${ECR_REGISTRY}"
+    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>&1)
+    
+    # Check if the command was successful
+    if [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        log_success "AWS Account ID: ${AWS_ACCOUNT_ID}"
+        log_success "ECR Registry: ${ECR_REGISTRY}"
+    else
+        log_error "Failed to get AWS account ID: $AWS_ACCOUNT_ID"
+        log_error "Please check your AWS credentials configuration."
+        exit 1
+    fi
 }
 
 # Create ECR repository
