@@ -70,8 +70,23 @@ check_prerequisites() {
     
     # Check AWS credentials
     log_info "Checking AWS credentials..."
+    
+    # Check AWS CLI config for invalid output format
+    if [ -f ~/.aws/config ]; then
+        INVALID_OUTPUT=$(grep -i "output.*=.*deploy" ~/.aws/config 2>/dev/null || echo "")
+        if [ -n "$INVALID_OUTPUT" ]; then
+            log_warning "Found invalid output format in AWS config. Attempting to fix..."
+            # Backup config
+            cp ~/.aws/config ~/.aws/config.backup.$(date +%s) 2>/dev/null || true
+            # Remove invalid output line
+            sed -i '/output.*=.*deploy/d' ~/.aws/config 2>/dev/null || true
+            log_info "AWS config file has been corrected. Please run 'aws configure' again if needed."
+        fi
+    fi
+    
     set +e  # Temporarily disable exit on error to capture output
-    AWS_IDENTITY_OUTPUT=$(aws sts get-caller-identity 2>&1)
+    # Explicitly set output format to json to avoid config issues
+    AWS_IDENTITY_OUTPUT=$(aws sts get-caller-identity --output json 2>&1)
     AWS_IDENTITY_EXIT_CODE=$?
     set -e  # Re-enable exit on error
     
@@ -79,8 +94,20 @@ check_prerequisites() {
         log_error "AWS credentials are not configured or invalid."
         log_error "Error details: $AWS_IDENTITY_OUTPUT"
         echo ""
+        
+        # Check if error is related to output format
+        if echo "$AWS_IDENTITY_OUTPUT" | grep -qi "unknown output type\|output format"; then
+            log_error "AWS CLI output format is incorrectly configured!"
+            log_info "To fix this, run:"
+            echo "   aws configure set output json"
+            echo "   OR"
+            echo "   Edit ~/.aws/config and change 'output = ...' to 'output = json'"
+            echo ""
+        fi
+        
         log_info "Please configure AWS credentials using one of these methods:"
         echo "  1. Run 'aws configure' and enter your credentials"
+        echo "     - When asked for 'Default output format', enter: json"
         echo "  2. Set environment variables:"
         echo "     export AWS_ACCESS_KEY_ID=your-access-key"
         echo "     export AWS_SECRET_ACCESS_KEY=your-secret-key"
@@ -139,16 +166,20 @@ check_prerequisites() {
 # Get AWS Account ID and ECR Registry
 get_aws_info() {
     log_info "Getting AWS account information..."
+    set +e
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>&1)
+    AWS_ACCOUNT_EXIT=$?
+    set -e
     
     # Check if the command was successful
-    if [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+    if [ $AWS_ACCOUNT_EXIT -eq 0 ] && [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         log_success "AWS Account ID: ${AWS_ACCOUNT_ID}"
         log_success "ECR Registry: ${ECR_REGISTRY}"
     else
         log_error "Failed to get AWS account ID: $AWS_ACCOUNT_ID"
         log_error "Please check your AWS credentials configuration."
+        log_info "Try running: aws configure set output json"
         exit 1
     fi
 }
@@ -157,7 +188,12 @@ get_aws_info() {
 create_ecr_repository() {
     log_info "Setting up ECR repository..."
     
-    if aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} &> /dev/null; then
+    set +e
+    aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} --output json &> /dev/null
+    ECR_EXISTS=$?
+    set -e
+    
+    if [ $ECR_EXISTS -eq 0 ]; then
         log_warning "ECR repository ${ECR_REPOSITORY_NAME} already exists"
     else
         log_info "Creating ECR repository..."
@@ -165,7 +201,8 @@ create_ecr_repository() {
             --repository-name ${ECR_REPOSITORY_NAME} \
             --region ${AWS_REGION} \
             --image-scanning-configuration scanOnPush=true \
-            --encryption-configuration encryptionType=AES256
+            --encryption-configuration encryptionType=AES256 \
+            --output json
         log_success "ECR repository created"
     fi
     
@@ -203,10 +240,16 @@ create_ecr_repository() {
 }
 EOF
     
+    set +e
     aws ecr put-lifecycle-policy \
         --repository-name ${ECR_REPOSITORY_NAME} \
         --lifecycle-policy-text file:///tmp/ecr-lifecycle-policy.json \
-        --region ${AWS_REGION} &> /dev/null || log_warning "Could not set lifecycle policy"
+        --region ${AWS_REGION} \
+        --output json &> /dev/null
+    set -e
+    if [ $? -ne 0 ]; then
+        log_warning "Could not set lifecycle policy"
+    fi
     
     rm -f /tmp/ecr-lifecycle-policy.json
 }
