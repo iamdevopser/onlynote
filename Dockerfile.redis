@@ -2,7 +2,12 @@
 FROM redis:7-alpine
 
 # Copy custom Redis configuration if it exists
-COPY docker/redis/redis.conf /usr/local/etc/redis/redis.conf 2>/dev/null || echo "# Redis Config" > /usr/local/etc/redis/redis.conf
+RUN mkdir -p /usr/local/etc/redis
+RUN if [ -f "docker/redis/redis.conf" ]; then \
+    cp docker/redis/redis.conf /usr/local/etc/redis/redis.conf; \
+    else \
+    echo "# Redis Configuration" > /usr/local/etc/redis/redis.conf; \
+    fi
 
 # Enable AOF persistence
 CMD ["redis-server", "--appendonly", "yes"]

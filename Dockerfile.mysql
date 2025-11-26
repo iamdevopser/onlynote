@@ -2,7 +2,12 @@
 FROM mysql:8.0
 
 # Copy custom MySQL configuration if it exists
-COPY docker/mysql/my.cnf /etc/mysql/conf.d/my.cnf 2>/dev/null || echo "# MySQL Config" > /etc/mysql/conf.d/my.cnf
+RUN mkdir -p /etc/mysql/conf.d
+RUN if [ -f "docker/mysql/my.cnf" ]; then \
+    cp docker/mysql/my.cnf /etc/mysql/conf.d/my.cnf; \
+    else \
+    echo "# MySQL Configuration" > /etc/mysql/conf.d/my.cnf; \
+    fi
 
 # Expose MySQL port
 EXPOSE 3306

@@ -309,7 +309,8 @@ create_docker_compose() {
     log_info "Creating docker-compose file with ECR images..."
     
     cat > docker-compose.ecr.yml << EOF
-version: '3.8'
+# Docker Compose file for OnlyNote Microservices
+# All services use images from AWS ECR
 
 services:
   # MySQL Database Service (from ECR)
@@ -344,8 +345,8 @@ services:
     volumes:
       - redis_data:/data
       - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
-    ports:
-      - "6379:6379"
+    # Port mapping removed - Redis is accessible only within Docker network
+    # External access not needed for microservice communication
     networks:
       - ${PROJECT_NAME}_network
     healthcheck:
@@ -385,7 +386,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "80:80"
+      - "8080:80"  # Host port 8080, container port 80
     networks:
       - ${PROJECT_NAME}_network
     healthcheck:
@@ -452,6 +453,30 @@ start_application() {
 
 # Main execution
 main() {
+    # Parse command line arguments
+    COMPOSE_ONLY=false
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --compose-only)
+                COMPOSE_ONLY=true
+                shift
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  --compose-only    Only recreate docker-compose.ecr.yml file (skip build/push)"
+                echo "  --help, -h        Show this help message"
+                echo ""
+                exit 0
+                ;;
+            *)
+                log_warning "Unknown option: $1"
+                shift
+                ;;
+        esac
+    done
+    
     echo ""
     echo "🚀 OnlyNote AWS ECR Microservices Deployment Script"
     echo "===================================================="
@@ -459,6 +484,15 @@ main() {
     
     # Check prerequisites
     check_prerequisites
+    
+    if [ "$COMPOSE_ONLY" = true ]; then
+        log_info "Compose-only mode: Only recreating docker-compose.ecr.yml"
+        # Create docker-compose file
+        create_docker_compose
+        log_success "docker-compose.ecr.yml recreated successfully!"
+        echo ""
+        exit 0
+    fi
     
     # Login to ECR
     login_to_ecr

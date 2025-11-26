@@ -39,8 +39,10 @@ RUN mkdir -p /var/www/html/storage /var/www/html/storage/framework/cache \
     && chmod -R 755 /var/www/html/storage \
     && chmod -R 755 /var/www/html/bootstrap/cache
 
-# Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader --no-interaction || true
+# Install PHP dependencies (only if composer.json exists)
+RUN if [ -f "composer.json" ]; then \
+    composer install --no-dev --optimize-autoloader --no-interaction || true; \
+    fi
 
 # Build frontend assets (if package.json exists)
 RUN if [ -f "package.json" ]; then \
@@ -49,11 +51,19 @@ RUN if [ -f "package.json" ]; then \
 
 # Copy nginx configuration (create directory if it doesn't exist)
 RUN mkdir -p /etc/nginx/sites-available
-COPY docker/nginx/default.conf /etc/nginx/sites-available/default 2>/dev/null || echo "server { listen 80; root /var/www/html/public; index index.php; location / { try_files \$uri \$uri/ /index.php?\$query_string; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name; include fastcgi_params; } }" > /etc/nginx/sites-available/default
+RUN if [ -f "docker/nginx/default.conf" ]; then \
+    cp docker/nginx/default.conf /etc/nginx/sites-available/default; \
+    else \
+    echo 'server { listen 80; root /var/www/html/public; index index.php; location / { try_files $uri $uri/ /index.php?$query_string; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name; include fastcgi_params; } }' > /etc/nginx/sites-available/default; \
+    fi
 
 # Copy supervisor configuration (create directory if it doesn't exist)
 RUN mkdir -p /etc/supervisor/conf.d
-COPY docker/supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf 2>/dev/null || echo "[supervisord]\nnodaemon=true\n[program:php-fpm]\ncommand=php-fpm\n[program:nginx]\ncommand=nginx -g 'daemon off;'" > /etc/supervisor/conf.d/supervisord.conf
+RUN if [ -f "docker/supervisor/supervisord.conf" ]; then \
+    cp docker/supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf; \
+    else \
+    echo -e '[supervisord]\nnodaemon=true\n[program:php-fpm]\ncommand=php-fpm\n[program:nginx]\ncommand=nginx -g "daemon off;"' > /etc/supervisor/conf.d/supervisord.conf; \
+    fi
 
 # Expose port
 EXPOSE 80
